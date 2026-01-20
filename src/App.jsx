@@ -237,7 +237,7 @@ function App() {
                       Whisper Base
                     </option>
                     <option value="onnx-community/whisper-small">
-                      Whisper Small (strong abit)
+                      Whisper Small
                     </option>
                   </select>
                 </div>
