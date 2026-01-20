@@ -14,8 +14,6 @@ function App() {
   // Create a reference to the worker object.
   const worker = useRef(null);
 
-  const recorderRef = useRef(null);
-
   // Model loading and progress
   const [status, setStatus] = useState(null);
   const [loadingMessage, setLoadingMessage] = useState("");
@@ -23,6 +21,7 @@ function App() {
 
   // Inputs and outputs
   const [text, setText] = useState("");
+  const [transcript, setTranscript] = useState("");
   const [tps, setTps] = useState(null);
   const [language, setLanguage] = useState("en");
   const [model, setModel] = useState("onnx-community/whisper-base");
@@ -78,7 +77,7 @@ function App() {
         case "ready":
           // Pipeline ready: the worker is ready to accept messages.
           setStatus("ready");
-          recorderRef.current?.start();
+          setRecording(true);
           break;
 
         case "start":
@@ -102,7 +101,17 @@ function App() {
         case "complete":
           // Generation complete: re-enable the "Generate" button
           setIsProcessing(false);
-          setText(e.data.output);
+          if (e.data.commit) {
+            setTranscript((prev) => {
+              const newPart = e.data.output?.[0] || ""; // output is array
+              if (!newPart.trim()) return prev;
+              return prev + (prev ? "\n" : "") + newPart.trim();
+            });
+            setText("");
+            setChunks([]);
+          } else {
+            setText(e.data.output);
+          }
           break;
       }
     };
@@ -117,7 +126,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (recorderRef.current) return; // Already set
+    if (audioContextRef.current) return;
 
     if (navigator.mediaDevices.getUserMedia) {
       navigator.mediaDevices
@@ -125,29 +134,30 @@ function App() {
         .then((stream) => {
           setStream(stream);
 
-          recorderRef.current = new MediaRecorder(stream);
           audioContextRef.current = new AudioContext({
             sampleRate: WHISPER_SAMPLING_RATE,
           });
 
-          recorderRef.current.onstart = () => {
-            setRecording(true);
-            setChunks([]);
-          };
-          recorderRef.current.ondataavailable = (e) => {
-            if (e.data.size > 0) {
-              setChunks((prev) => [...prev, e.data]);
-            } else {
-              // Empty chunk received, so we request new data after a short timeout
-              setTimeout(() => {
-                recorderRef.current.requestData();
-              }, 25);
-            }
+          const source =
+            audioContextRef.current.createMediaStreamSource(stream);
+          const processor = audioContextRef.current.createScriptProcessor(
+            4096,
+            1,
+            1,
+          );
+          const gain = audioContextRef.current.createGain();
+          gain.gain.value = 0; // Mute output
+
+          processor.onaudioprocess = (e) => {
+            if (!recording) return; // Only capture if recording
+            const input = e.inputBuffer.getChannelData(0);
+            // Copy buffer because input is reused
+            setChunks((prev) => [...prev, new Float32Array(input)]);
           };
 
-          recorderRef.current.onstop = () => {
-            setRecording(false);
-          };
+          source.connect(processor);
+          processor.connect(gain);
+          gain.connect(audioContextRef.current.destination);
         })
         .catch((err) => console.error("The following error occurred: ", err));
     } else {
@@ -155,41 +165,57 @@ function App() {
     }
 
     return () => {
-      recorderRef.current?.stop();
-      recorderRef.current = null;
+      // Cleanup
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
     };
-  }, []);
+  }, [recording]);
 
   useEffect(() => {
-    if (!recorderRef.current) return;
     if (!recording) return;
     if (isProcessing) return;
     if (status !== "ready") return;
 
     if (chunks.length > 0) {
-      // Generate from data
-      const blob = new Blob(chunks, { type: recorderRef.current.mimeType });
+      // Merge chunks
+      const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+      let audio = new Float32Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        audio.set(chunk, offset);
+        offset += chunk.length;
+      }
 
-      const fileReader = new FileReader();
-
-      fileReader.onloadend = async () => {
-        const arrayBuffer = fileReader.result;
-        const decoded =
-          await audioContextRef.current.decodeAudioData(arrayBuffer);
-        let audio = decoded.getChannelData(0);
-        if (audio.length > MAX_SAMPLES) {
-          // Get last MAX_SAMPLES
-          audio = audio.slice(-MAX_SAMPLES);
+      let commit = false;
+      // VAD: Simple RMS threshold
+      if (audio.length > WHISPER_SAMPLING_RATE * 1) {
+        // Check if we have at least 1s of audio
+        const lastSeconds = WHISPER_SAMPLING_RATE * 2; // Check last 2 seconds for silence
+        const tail = audio.slice(-lastSeconds);
+        let sumSquared = 0;
+        for (let i = 0; i < tail.length; i++) {
+          sumSquared += tail[i] * tail[i];
         }
+        const rms = Math.sqrt(sumSquared / tail.length);
 
-        worker.current.postMessage({
-          type: "generate",
-          data: { audio, language },
-        });
-      };
-      fileReader.readAsArrayBuffer(blob);
-    } else {
-      recorderRef.current?.requestData();
+        // If silent and we have enough audio (>= 3s)
+        // 0.005 is a bit stricter threshold
+        if (rms < 0.005 && audio.length > WHISPER_SAMPLING_RATE * 3) {
+          commit = true;
+        }
+      }
+
+      if (audio.length > MAX_SAMPLES) {
+        // Get last MAX_SAMPLES
+        audio = audio.slice(-MAX_SAMPLES);
+      }
+
+      worker.current.postMessage({
+        type: "generate",
+        data: { audio, language, commit },
+      });
     }
   }, [status, recording, isProcessing, chunks, language]);
 
@@ -264,9 +290,12 @@ function App() {
               <AudioVisualizer className="w-full rounded-lg" stream={stream} />
               {status === "ready" && (
                 <div className="relative">
-                  <p className="w-full h-[80px] overflow-y-auto overflow-wrap-anywhere border rounded-lg p-2">
+                  <div className="w-full min-h-[80px] overflow-wrap-anywhere border rounded-lg p-2 whitespace-pre-wrap">
+                    {transcript && (
+                      <div className="text-gray-500">{transcript}</div>
+                    )}
                     {text}
-                  </p>
+                  </div>
                   {tps && (
                     <span className="absolute bottom-0 right-0 px-1">
                       {tps.toFixed(2)} tok/s
@@ -280,20 +309,22 @@ function App() {
                 <LanguageSelector
                   language={language}
                   setLanguage={(e) => {
-                    recorderRef.current?.stop();
+                    setRecording(false);
                     setLanguage(e);
-                    recorderRef.current?.start();
+                    setChunks([]);
+                    setTimeout(() => setRecording(true), 100);
                   }}
                 />
-                <button
+                {/* <button
                   className="border rounded-lg px-2 absolute right-2"
                   onClick={() => {
-                    recorderRef.current?.stop();
-                    recorderRef.current?.start();
+                    setRecording(false);
+                    setChunks([]);
+                    setTimeout(() => setRecording(true), 100);
                   }}
                 >
                   Reset
-                </button>
+                </button> */}
               </div>
             )}
             {status === "loading" && (

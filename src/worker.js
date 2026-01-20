@@ -50,7 +50,7 @@ class AutomaticSpeechRecognitionPipeline {
 }
 
 let processing = false;
-async function generate({ audio, language }) {
+async function generate({ audio, language, commit }) {
   if (processing) return;
   processing = true;
 
@@ -104,6 +104,7 @@ async function generate({ audio, language }) {
   self.postMessage({
     status: "complete",
     output: decoded,
+    commit,
   });
   processing = false;
 }
