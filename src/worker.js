@@ -96,9 +96,12 @@ async function generate({ audio, language, commit }) {
     streamer,
   });
 
-  const decoded = tokenizer.batch_decode(outputs, {
-    skip_special_tokens: true,
-  });
+  const decoded = tokenizer
+    .batch_decode(outputs, {
+      skip_special_tokens: true,
+    })
+    .map((str) => str.replace(/\(.*?\)|\[.*?\]/g, "").trim())
+    .filter((str) => str.length > 0);
 
   // Send the output back to the main thread
   self.postMessage({
