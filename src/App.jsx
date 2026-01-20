@@ -239,6 +239,9 @@ function App() {
                     <option value="onnx-community/whisper-small">
                       Whisper Small
                     </option>
+                    <option value="onnx-community/whisper-medium-ONNX">
+                      Whisper Medium
+                    </option>
                   </select>
                 </div>
 
