@@ -102,7 +102,6 @@ function App() {
         case "complete":
           // Generation complete: re-enable the "Generate" button
           setIsProcessing(false);
-          console.log("asd", e.data.output);
           setText(e.data.output);
           break;
       }
